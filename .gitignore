@@ -1,0 +1,28 @@
+node_modules/
+*.log
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 发布过程残留
+*.orig
+*.bak
+*.rej
+*.tmp
+
+# 本地临时工作目录
+.tmp-egm-audit/
+.tmp-egm-*/
+_pub_prep/
+_pub_prep*/
+_publish/
+_release/
+.npmrc
+
+# 本地调试探针与解包产物
+probe/
+/dsh-egm/
+_asar/

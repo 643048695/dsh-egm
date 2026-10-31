@@ -1,0 +1,26 @@
+dsh-egm
+Copyright (c) dsh-egm contributors
+
+This product includes material developed at Google as part of the
+Elephant-Goldfish Model (EGM) project:
+
+  https://github.com/google/elephant-goldfish-model
+
+The following directories are vendored unmodified from that project at commit
+a8380ab5f0aba392c97e31c79f9a6666b3f09f14 and remain under the Apache License,
+Version 2.0 (see LICENSE and vendor/egm/LICENSE):
+
+  vendor/egm/agents/      reviewer and orchestrator persona files (9)
+  vendor/egm/resources/   shared execution rules and document standards (7)
+  vendor/egm/skills/      EGM skill packages (7 packages)
+  vendor/egm/docs/        upstream documentation pages (9)
+
+vendor/egm/LICENSE is the upstream license text, copied byte for byte.
+
+The upstream repository ships no NOTICE file. This NOTICE was added by the
+dsh-egm maintainers to record where the vendored material came from; it is not
+an upstream file.
+
+The DSH adaptation in skills/egm-classic-* and resources/classic-*.md, and the
+original dsh-egm code, are works of the dsh-egm maintainers and are not part of
+the upstream project.

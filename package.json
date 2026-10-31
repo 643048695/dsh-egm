@@ -1,0 +1,74 @@
+{
+  "name": "dsh-egm",
+  "version": "0.10.2",
+  "description": "Design-review gate for DSH: the Elephant drafts the design, zero-context Goldfish reviewers attack it, you approve before any implementation.",
+  "license": "Apache-2.0",
+  "author": "643048695",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/643048695/dsh-egm.git"
+  },
+  "homepage": "https://github.com/643048695/dsh-egm#readme",
+  "bugs": {
+    "url": "https://github.com/643048695/dsh-egm/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "skills",
+    "agents",
+    "resources",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "NOTICE",
+    "LICENSE",
+    "package.json",
+    "vendor"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh-plugin-bundle",
+    "skill",
+    "egm",
+    "design-review",
+    "gate"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-skill": ">=0.1.7-rc.1 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-skill": {
+      "optional": true
+    }
+  }
+}

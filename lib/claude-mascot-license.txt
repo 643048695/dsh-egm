@@ -1,0 +1,38 @@
+Third-party attribution for the adapted mascot mounting and placement code
+
+Source project: dsh-claude-style
+Author: Nwflower
+Source revision: a0059bde45f968b246bf05c9bb6b87a4a592189b
+
+The mascot mounting, release, CSS placement and anchored popover placement
+portions of lib/client.js are adapted from:
+https://github.com/Nwflower/dsh-claude-style/blob/a0059bde45f968b246bf05c9bb6b87a4a592189b/packages/client/src/features/mascot/mascot-player.ts
+https://github.com/Nwflower/dsh-claude-style/blob/a0059bde45f968b246bf05c9bb6b87a4a592189b/packages/client/src/features/mascot/whale.css
+https://github.com/Nwflower/dsh-claude-style/blob/a0059bde45f968b246bf05c9bb6b87a4a592189b/packages/client/src/features/mascot/crab.css
+https://github.com/Nwflower/dsh-claude-style/blob/a0059bde45f968b246bf05c9bb6b87a4a592189b/packages/client/src/shared/popover.ts
+
+Only mascot mounting, mascot placement and popover placement are adapted.
+No Sodium engine code, proprietary fonts or mascot artwork is included.
+The adapted portions remain under the following license.
+
+MIT License
+
+Copyright (c) 2026 Nwflower
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

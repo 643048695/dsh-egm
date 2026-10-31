@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the bundle manifest the plugin market requires
+        run: |
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const fail = (m) => { console.error('✗ ' + m); process.exit(1); };
+
+          if (!pkg.dsh || !pkg.dsh.bundle) {
+            fail('package.json declares no dsh.bundle — the market will reject this.');
+          }
+          const patch = pkg.dsh.bundle.patch;
+          if (!patch) fail('dsh.bundle.patch is missing.');
+          const patchPath = patch.replace(/^\.\//, '');
+          if (!fs.existsSync(patchPath)) fail('dsh.bundle.patch points at a missing file: ' + patch);
+
+          const text = fs.readFileSync(patchPath, 'utf8');
+          const bare = pkg.name.replace(/^@[^/]+\//, '');
+          if (!text.includes(pkg.name) && !text.includes(bare)) {
+            fail('cordis.patch.yml does not mention the package name.');
+          }
+
+          for (const entry of [pkg.main, ...Object.values(pkg.exports || {})]) {
+            if (typeof entry !== 'string') continue;
+            const p = entry.replace(/^\.\//, '');
+            if (p && !p.includes(':') && !fs.existsSync(p)) fail('missing entry file: ' + p);
+          }
+
+          console.log('✓ bundle manifest looks installable');
+          "

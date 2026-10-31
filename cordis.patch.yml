@@ -1,0 +1,5 @@
+# dsh-egm bundle layer.
+# 注册一个 bundle 层，插件在 apply 时把自带技能挂到 ctx.skills 上。
+- insert:
+    - id: egm
+      name: dsh-egm
