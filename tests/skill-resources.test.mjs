@@ -18,6 +18,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -70,7 +71,9 @@ function copyPackage() {
     if (existsSync(source)) cpSync(source, join(root, entry), { recursive: true })
   }
   tempParents.push(parent)
-  return root
+  // macOS 的 /var 是指向 /private/var 的软链接，lib 会 realpath 包根；
+  // 返回前同步解析，保证断言与实现比较的是同一个真实路径。
+  return realpathSync(root)
 }
 
 /** 从副本里动态 import 一个模块（带唯一 query，避免命中源包模块缓存）。 */

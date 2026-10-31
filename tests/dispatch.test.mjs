@@ -735,7 +735,9 @@ test('标准文件缺失：明确 E_STANDARD_MISSING，不换标准不降级', a
 
 test('sources：越界 / 不存在 / 合法文件写清单', async (t) => {
   const outside = await run(t, {
-    args: { docPath: '.egm/design.md', role: 'logic', sources: ['../../etc/passwd'] },
+    // 越界且不存在的路径：Windows 上 /etc/passwd 不存在会先报缺失，
+    // Linux 上它真实存在会改报越界；用两边都不存在的越界路径保证断言稳定。
+    args: { docPath: '.egm/design.md', role: 'logic', sources: ['../../egm-test-no-such-dir/nope.js'] },
   })
   assert.equal(outside.result.code, 'E_SOURCE_MISSING')
 
@@ -764,7 +766,8 @@ test('sources：越界 / 不存在 / 合法文件写清单', async (t) => {
   assert.equal(result.sources[0].relative, 'src/a.js')
   assert.equal(result.sources[0].sha256, createHash('sha256').update('export const a = 1\n').digest('hex'))
   const manifest = JSON.parse(await readFile(join(result.scratch, 'sources.json'), 'utf8'))
-  assert.equal(manifest.sources[0].path, sourcePath)
+  // lib 会 realpath 源文件（macOS /var → /private/var），断言同样解析后比较。
+  assert.equal(manifest.sources[0].path, await nodeFs.realpath(sourcePath))
   assert.equal(manifest.accessIsolated, false)
   assert.ok(result.sources[0].copyPath.includes(result.scratch))
   assert.equal(await readFile(result.sources[0].copyPath, 'utf8'), 'export const a = 1\n')
