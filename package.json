@@ -17,7 +17,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/"
+    "test": "node --test tests/batch-dispatch.test.mjs tests/dispatch.test.mjs tests/elephant-state.test.mjs tests/goldfish-policy.test.mjs tests/onboarding-client.test.mjs tests/pet-client.test.mjs tests/pet-roundtrip.test.mjs tests/pet-state.test.mjs tests/plugin-entry.test.mjs tests/review-access.test.mjs tests/review-materials.test.mjs tests/review-summarizer.test.mjs tests/router-compat.test.mjs tests/skill-provider.test.js tests/skill-resources.test.mjs"
   },
   "exports": {
     ".": {

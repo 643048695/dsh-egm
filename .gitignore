@@ -26,3 +26,6 @@ _release/
 probe/
 /dsh-egm/
 _asar/
+
+# 插件运行时数据（任务记录、评审产物）
+.egm/

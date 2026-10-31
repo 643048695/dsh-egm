@@ -48,6 +48,13 @@ const STANDARD_FILES = [
   'implementation-readiness-standard.md',
 ]
 
+test.beforeEach(async () => {
+  await rm(join(process.cwd(), '.egm', 'sessions'), { recursive: true, force: true })
+})
+test.after(async () => {
+  await rm(join(process.cwd(), '.egm', 'sessions'), { recursive: true, force: true })
+})
+
 const io = (overrides = {}) => ({
   copyFile: nodeFs.copyFile,
   mkdir: nodeFs.mkdir,
@@ -118,6 +125,10 @@ function fakeAgent(id = 'test-session', cwd = process.cwd()) {
     followupCalls: [],
     followup(payload) {
       this.followupCalls.push(payload)
+    },
+    steerCalls: [],
+    steer(payload) {
+      this.steerCalls.push(payload)
     },
   }
 }
@@ -289,41 +300,50 @@ test('命令 handler：/egm 打开窗口；空输入报错，followup 失败如�
   assert.equal(empty.kind, 'error')
 
   const broken = fakeAgent('cmd-broken')
-  broken.followup = () => {
-    throw new Error('followup 炸了')
+  broken.steer = () => {
+    throw new Error('steer 炸了')
   }
   const failed = commands.get('egm').handler({ agent: broken, rawInput: '做个工具' })
   assert.equal(failed.kind, 'error')
-  assert.match(failed.text, /followup 炸了/)
+  assert.match(failed.text, /steer 炸了/)
+  assert.match(failed.text, /EGM 处理异常/)
+  assert.match(failed.text, /任务记录或消息可能已经提交，请先查看当前状态，避免重复发送。/)
   assert.notEqual(peekGate(broken), null, '无法确认入队状态时窗口保持开启，避免误伤已排队的大象')
 
   const ok = fakeAgent('cmd-ok')
   const opened = commands.get('egm').handler({ agent: ok, rawInput: '做个工具' })
   assert.equal(opened.kind, 'success')
+  assert.equal(opened.text, '大象已开始梳理当前方案。')
+  assert.equal(opened.data.isContinuation, false)
   assert.notEqual(peekGate(ok), null)
-  assert.equal(ok.followupCalls.length, 2)
-  // 隐藏/折叠上下文消息（先入队）
-  assert.deepEqual(ok.followupCalls[0].source, {
+  assert.equal(ok.steerCalls.length, 1)
+  const okMsg = ok.steerCalls[0]
+  assert.equal(typeof okMsg.id, 'string')
+  assert.ok(okMsg.id.length > 0)
+  assert.equal(okMsg.role, 'user')
+  assert.deepEqual(okMsg.source, {
     kind: 'context',
     name: 'egm-kickoff-procedure',
     form: 'notice',
-    summary: 'EGM 守门规程与操作指引（折叠）',
+    summary: 'EGM 需求：做个工具',
   })
-  assert.match(ok.followupCalls[0].content[0].text, /派发窗口已打开/)
-  assert.ok(ok.followupCalls[0].content[0].text.includes(join('skills', 'egm-gate', 'SKILL.md')))
-  assert.match(ok.followupCalls[0].content[0].text, /无法读取/)
-  assert.match(ok.followupCalls[0].content[0].text, /egm-unsafe/)
-  // 用户简要需求提示（后入队，作为当前会话用户输入展示）
-  assert.deepEqual(ok.followupCalls[1].source, { kind: 'user' })
-  assert.match(ok.followupCalls[1].content[0].text, /想做的事：做个工具/)
-  assert.match(ok.followupCalls[1].content[0].text, /EGM 守门已启动/)
+  assert.equal(okMsg.content.length, 1)
+  assert.equal(okMsg.content[0].type, 'text')
+  assert.match(okMsg.content[0].text, /想做的事：做个工具/)
+  assert.match(okMsg.content[0].text, /EGM 守门已启动/)
+  assert.match(okMsg.content[0].text, /现在还没有派出金鱼/)
+  assert.match(okMsg.content[0].text, /无法证实金鱼运行环境是只读隔离的/)
+  assert.match(okMsg.content[0].text, /派发窗口已打开/)
+  assert.ok(okMsg.content[0].text.includes(join('skills', 'egm-gate', 'SKILL.md')))
+  assert.match(okMsg.content[0].text, /无法读取/)
+  assert.match(okMsg.content[0].text, /egm-unsafe/)
 
   // 无 session id：拒绝开窗，不发消息。
-  const anonymous = { session: {}, followupCalls: [], followup() { this.followupCalls.push(1) } }
+  const anonymous = { session: {}, steerCalls: [], steer() { this.steerCalls.push(1) } }
   const rejected = commands.get('egm').handler({ agent: anonymous, rawInput: '做个工具' })
   assert.equal(rejected.kind, 'error')
-  assert.match(rejected.text, /无法验证当前会话身份/)
-  assert.equal(anonymous.followupCalls.length, 0)
+  assert.match(rejected.text, /无法核实当前会话/)
+  assert.equal(anonymous.steerCalls.length, 0)
 })
 
 test('命令 handler：/egm 原生输入框支持图片附件（图文、纯图、失败、未授权与 UserMessage 结构）', () => {
@@ -346,19 +366,17 @@ test('命令 handler：/egm 原生输入框支持图片附件（图文、纯图�
   assert.equal(resTextImg.kind, 'success')
   assert.notEqual(peekGate(agentTextImg), null, '应成功打开派发窗口')
   assert.equal(peekUnsafePermit(agentTextImg), null, '不得自动开启非隔离许可')
-  assert.equal(agentTextImg.followupCalls.length, 2)
-  const procMsgTextImg = agentTextImg.followupCalls[0]
-  assert.deepEqual(procMsgTextImg.source, {
-    kind: 'context',
-    name: 'egm-kickoff-procedure',
-    form: 'notice',
-    summary: 'EGM 守门规程与操作指引（折叠）',
-  })
-  const msgTextImg = agentTextImg.followupCalls[1]
+  assert.equal(agentTextImg.steerCalls.length, 1)
+  const msgTextImg = agentTextImg.steerCalls[0]
   assert.equal(typeof msgTextImg.id, 'string', 'UserMessage 必须携带有效 id')
   assert.ok(msgTextImg.id.length > 0)
   assert.equal(msgTextImg.role, 'user', 'UserMessage role 必须为 user')
-  assert.deepEqual(msgTextImg.source, { kind: 'user' }, 'UserMessage source 必须为 { kind: "user" }')
+  assert.deepEqual(msgTextImg.source, {
+    kind: 'context',
+    name: 'egm-kickoff-procedure',
+    form: 'notice',
+    summary: 'EGM 需求：设计一个美观的看板',
+  })
   assert.equal(msgTextImg.content.length, 3, 'content 应包含两个附件与一个文本块')
   assert.deepEqual(msgTextImg.content[0], imgAttachment1, '第一个附件未丢失且在前方')
   assert.deepEqual(msgTextImg.content[1], imgAttachment2, '第二个附件未丢失且在前方')
@@ -377,19 +395,17 @@ test('命令 handler：/egm 原生输入框支持图片附件（图文、纯图�
   assert.equal(resPureImg.kind, 'success')
   assert.notEqual(peekGate(agentPureImg), null, '纯图输入应成功打开派发窗口')
   assert.equal(peekUnsafePermit(agentPureImg), null, '纯图输入不得开启非隔离许可')
-  assert.equal(agentPureImg.followupCalls.length, 2)
-  const procMsgPureImg = agentPureImg.followupCalls[0]
-  assert.deepEqual(procMsgPureImg.source, {
-    kind: 'context',
-    name: 'egm-kickoff-procedure',
-    form: 'notice',
-    summary: 'EGM 守门规程与操作指引（折叠）',
-  })
-  const msgPureImg = agentPureImg.followupCalls[1]
+  assert.equal(agentPureImg.steerCalls.length, 1)
+  const msgPureImg = agentPureImg.steerCalls[0]
   assert.equal(typeof msgPureImg.id, 'string')
   assert.ok(msgPureImg.id.length > 0)
   assert.equal(msgPureImg.role, 'user')
-  assert.deepEqual(msgPureImg.source, { kind: 'user' })
+  assert.deepEqual(msgPureImg.source, {
+    kind: 'context',
+    name: 'egm-kickoff-procedure',
+    form: 'notice',
+    summary: `EGM 需求：${DEFAULT_IMAGE_IDEA}`,
+  })
   assert.equal(msgPureImg.content.length, 2)
   assert.deepEqual(msgPureImg.content[0], imgPure, '纯图附件未丢失')
   assert.equal(msgPureImg.content[1].type, 'text')
@@ -404,14 +420,14 @@ test('命令 handler：/egm 原生输入框支持图片附件（图文、纯图�
     attachments: [],
   })
   assert.equal(resEmptyBoth.kind, 'error', '缺文字且缺附件必须报错')
-  assert.match(resEmptyBoth.text, /用法：\/egm/)
+  assert.match(resEmptyBoth.text, /请先填写需求或附上图片/)
   assert.equal(peekGate(agentEmptyBoth), null, '失败时不应开窗')
-  assert.equal(agentEmptyBoth.followupCalls.length, 0, '失败时不应调用 followup')
+  assert.equal(agentEmptyBoth.steerCalls.length, 0, '失败时不应调用 steer')
 
-  // 3b. 失败：纯图或图文时 followup 抛错，如实提示且窗口保持开启
+  // 3b. 失败：纯图或图文时 steer 抛错，如实提示且窗口保持开启
   const agentThrow = fakeAgent('cmd-throw')
-  agentThrow.followup = () => {
-    throw new Error('followup 模拟网络中断')
+  agentThrow.steer = () => {
+    throw new Error('steer 模拟网络中断')
   }
   const resThrow = egmCommand.handler({
     agent: agentThrow,
@@ -419,21 +435,22 @@ test('命令 handler：/egm 原生输入框支持图片附件（图文、纯图�
     attachments: [{ type: 'image', attachment: 'ref-throw' }],
   })
   assert.equal(resThrow.kind, 'error')
-  assert.match(resThrow.text, /followup 模拟网络中断/)
-  assert.match(resThrow.text, /无法确认这条需求是否已经进入会话队列/)
+  assert.match(resThrow.text, /steer 模拟网络中断/)
+  assert.match(resThrow.text, /EGM 处理异常/)
+  assert.match(resThrow.text, /任务记录或消息可能已经提交，请先查看当前状态，避免重复发送。/)
   assert.doesNotMatch(resThrow.text, /未入队|没有发送|附件已保留/)
   assert.notEqual(peekGate(agentThrow), null, '无法确认入队状态时保持窗口开启')
 
   // 4. 未授权 / 无会话身份：无法验证当前会话身份时拒绝开窗并保留 fail-closed
-  const agentNoSession = { session: {}, followupCalls: [], followup() { this.followupCalls.push(1) } }
+  const agentNoSession = { session: {}, steerCalls: [], steer() { this.steerCalls.push(1) } }
   const resNoSession = egmCommand.handler({
     agent: agentNoSession,
     rawInput: '',
     attachments: [{ type: 'image', attachment: 'ref-unauth' }],
   })
   assert.equal(resNoSession.kind, 'error')
-  assert.match(resNoSession.text, /无法验证当前会话身份/)
-  assert.equal(agentNoSession.followupCalls.length, 0, '未授权时不应触发 followup，不泄漏附件')
+  assert.match(resNoSession.text, /无法核实当前会话/)
+  assert.equal(agentNoSession.steerCalls.length, 0, '未授权时不应触发 steer，不泄漏附件')
   assert.equal(peekGate(agentNoSession), null, '未授权时不应开启窗口')
 })
 
@@ -442,12 +459,12 @@ test('命令 handler：/egm 提交后异常如实提示（不声称未发送、�
   const ctx = { commands: { register: (definition) => commands.set(definition.name, definition) } }
   const events = []
   registerEgmCommand(ctx, { onEvent: (event) => events.push(event) })
-  registerEgmSafeCommand(ctx)
+  registerEgmSafeCommand(ctx, { onEvent: (event) => events.push(event) })
   const egmCommand = commands.get('egm')
 
   // 提交后异常：宿主在 session.append 之后仍可能抛错，插件无法判断消息是否已入队
   const agentError = fakeAgent('post-commit-error')
-  agentError.followup = () => {
+  agentError.steer = () => {
     throw new Error('wakeDriver crashed after inbox append')
   }
   const resError = egmCommand.handler({
@@ -457,20 +474,22 @@ test('命令 handler：/egm 提交后异常如实提示（不声称未发送、�
   })
   assert.equal(resError.kind, 'error')
   assert.match(resError.text, /wakeDriver crashed after inbox append/)
-  assert.match(resError.text, /无法确认这条需求是否已经进入会话队列/)
+  assert.match(resError.text, /EGM 处理异常/)
+  assert.match(resError.text, /任务记录或消息可能已经提交，请先查看当前状态，避免重复发送。/)
   assert.doesNotMatch(resError.text, /未入队|没有发送|附件已保留/)
   assert.notEqual(peekGate(agentError), null, '无法确认入队状态时保持窗口开启，避免误伤已排队的大象')
   assert.ok(events.some((e) => e.type === 'gate-opened'), '异常前已上报 gate-opened')
-  assert.ok(events.some((e) => e.type === 'reset'), '异常时上报 reset 让界面回空闲；真实事件随后自纠')
+  assert.equal(events.some((e) => e.type === 'reset'), false, '异常时不擅自 reset 遮蔽原失败')
 
   // /egm-safe 仍能关窗重置
   const safeRes = commands.get('egm-safe').handler({ agent: agentError })
   assert.equal(safeRes.kind, 'success')
   assert.equal(peekGate(agentError), null)
+  assert.ok(events.some((e) => e.type === 'reset'), 'safe 重置时上报 reset 让界面回空闲')
 
-  // 重置后再试（模拟 followup 恢复正常）
-  agentError.followup = (msg) => {
-    agentError.followupCalls.push(msg)
+  // 重置后再试（模拟 steer 恢复正常）
+  agentError.steer = (msg) => {
+    agentError.steerCalls.push(msg)
   }
   const resAfterSafe = egmCommand.handler({
     agent: agentError,
@@ -1070,18 +1089,17 @@ test('工具 schema：只有路径、白名单角色、mode 与 range，没有�
     'docPath',
     'materials',
     'mode',
+    'profile',
     'range',
     'role',
     'sources',
     'stage',
   ])
-  assert.equal(definition.parameters.additionalProperties, false)
   assert.deepEqual(definition.parameters.required, ['docPath', 'role'])
-  assert.deepEqual(definition.parameters.properties.role.enum, ROLE_IDS)
-  assert.equal(definition.parameters.properties.role.enum.length, 10)
+  assert.equal(definition.parameters.properties.role.type, 'string')
+  assert.equal(definition.parameters.properties.role.enum, undefined)
   assert.deepEqual(definition.parameters.properties.mode.enum, ['review', 'brainstorm'])
   assert.deepEqual(definition.parameters.properties.range.required, ['start', 'end'])
-  assert.equal(definition.parameters.properties.range.additionalProperties, false)
   assert.match(definition.description, /\/egm/)
   assert.match(definition.description, /\/egm-unsafe/)
   assert.match(definition.description, /不是安全隔离/i)
@@ -1419,14 +1437,14 @@ test('命令 handler：/egm-review-access notify 注入内部上下文通知（�
   // 1. notify grant 只能通知真实已开启的许可
   const resNotGranted = cmd.handler({ agent, rawInput: 'notify grant' })
   assert.equal(resNotGranted.code, 'E_ACCESS_STATE_MISMATCH')
-  assert.equal(agent.followupCalls.length, 0)
+  assert.equal(agent.steerCalls.length, 0)
   assert.equal(cmd.handler({ agent, rawInput: '确认无隔离' }).kind, 'success')
   const resGrant = cmd.handler({ agent, rawInput: 'notify grant' })
   assert.equal(resGrant.kind, 'success')
   assert.equal(resGrant.data.notified, true)
   assert.equal(resGrant.data.action, 'grant')
-  assert.equal(agent.followupCalls.length, 1)
-  const grantMsg = agent.followupCalls[0]
+  assert.equal(agent.steerCalls.length, 1)
+  const grantMsg = agent.steerCalls[0]
   assert.deepEqual(grantMsg.source, {
     kind: 'context',
     name: 'egm-review-notice',
@@ -1440,8 +1458,8 @@ test('命令 handler：/egm-review-access notify 注入内部上下文通知（�
   const resDeny = cmd.handler({ agent, rawInput: 'continue deny' })
   assert.equal(resDeny.kind, 'success')
   assert.equal(resDeny.data.action, 'deny')
-  assert.equal(agent.followupCalls.length, 2)
-  const denyMsg = agent.followupCalls[1]
+  assert.equal(agent.steerCalls.length, 2)
+  const denyMsg = agent.steerCalls[1]
   assert.deepEqual(denyMsg.source, {
     kind: 'context',
     name: 'egm-review-notice',

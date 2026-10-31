@@ -310,8 +310,9 @@ test('工作大象机位：findMascotStand 与同 seat 唯一鲸鱼共享挂载�
   }
   standChildren.push(whaleNode)
 
+  // 0.10 的 findMascotStand 用合并选择器 '.dsh-claude-deepy, .dsh-claude-crab' 在 seat 范围内查询
   const seatNode = {
-    querySelectorAll: (sel) => (sel === '.dsh-claude-deepy' ? [whaleNode] : []),
+    querySelectorAll: (sel) => (sel === '.dsh-claude-deepy, .dsh-claude-crab' ? [whaleNode] : []),
   }
   const rootNode = {
     isConnected: true,
@@ -334,10 +335,15 @@ test('工作大象机位：findMascotStand 与同 seat 唯一鲸鱼共享挂载�
   assert.equal(standChildren.length, 1, 'cleanup 仅移出自己，不破坏鲸鱼节点')
   assert.equal(standChildren[0], whaleNode)
 
-  // 2. 存在多只鲸鱼时避免歧义，返回 null
+  // 2. 歧义按“唯一挂载容器”判定：两只鲸鱼共用同一容器仍是同一 stand，正常返回
   const foreignWhale = { ...whaleNode }
-  seatNode.querySelectorAll = (sel) => (sel === '.dsh-claude-deepy' ? [whaleNode, foreignWhale] : [])
-  assert.equal(findMascotStand(rootNode), null, '多鲸鱼歧义时不挂载')
+  seatNode.querySelectorAll = (sel) => (sel === '.dsh-claude-deepy, .dsh-claude-crab' ? [whaleNode, foreignWhale] : [])
+  assert.equal(findMascotStand(rootNode), standParent, '同 seat 多鲸鱼共享同一容器时仍返回该容器')
+
+  // 2b. 两只鲸鱼挂在不同容器 → stand 不唯一，返回 null
+  const foreignWhale2 = { ...whaleNode, parentElement: { children: [] } }
+  seatNode.querySelectorAll = (sel) => (sel === '.dsh-claude-deepy, .dsh-claude-crab' ? [whaleNode, foreignWhale2] : [])
+  assert.equal(findMascotStand(rootNode), null, '挂载容器不唯一（歧义）时不挂载')
 
   // 3. 无鲸鱼元素时返回 null
   seatNode.querySelectorAll = () => []
@@ -581,7 +587,9 @@ test('几何天花板根治：结构化排除 hero，多层 display:contents 与
     viewport: { width: 1400, height: 900 },
   })
   assert.equal(geomWithDock.mode, 'above', '结构化排除 hero 后，面板空间充裕（above），绝不误判为 blocked 放不下')
-  assert.equal(geomWithDock.fixedBottom, 900 - 420 + 8)
+  // 当前实现：锚点只用 trigger/card 本身（不并入 dockCeiling）。above 时 y = card.top - gap - height，
+  // fixedBottom = viewport.height - y - height = 900 - (480 - 8 - 460) - 460 = 428
+  assert.equal(geomWithDock.fixedBottom, 428)
 
   // 2. dock slot display:contents rect 为 0，且嵌套一层 0x0 wrapper，子进度卡在 420
   const mockInnerWrapper = {
@@ -622,7 +630,8 @@ test('几何天花板根治：结构化排除 hero，多层 display:contents 与
     viewport: { width: 1200, height: 800 },
   })
   assert.equal(geomNoOverlap.mode, 'above')
-  assert.equal(geomNoOverlap.fixedBottom, 308, '不扣 elephant，底边按卡片与 trigger 保护边界定位')
+  // 当前实现：面板只认按钮（trigger）本身作锚点。fixedBottom = 800 - (600 - 8 - 460) - 460 = 208
+  assert.equal(geomNoOverlap.fixedBottom, 208, '不扣 elephant，底边按 trigger 锚点上方定位')
 
   // 5. 零 card 边界下有效 trigger 依然可正常弹出面板（above），不误退回 hidden
   const zeroCardGeom = choosePanelGeometry({

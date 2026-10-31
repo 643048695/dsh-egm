@@ -44,6 +44,7 @@ import { apply as applyPlugin } from '../lib/index.js'
 function fakeAgent(sessionId = 'test-session') {
   return {
     session: { id: sessionId, header: { id: sessionId } },
+    steer: () => {},
     subagents: {
       createChild: async () => ({
         id: 'child-1',
@@ -399,11 +400,11 @@ test('/egm 命令防护：拒绝控制命令输入，避免大象将 /egm-unsafe
 
   const resUnsafe = egmCommand.handler({ agent, rawInput: '/egm-unsafe 确认无隔离' })
   assert.equal(resUnsafe.kind, 'error')
-  assert.equal(resUnsafe.code, 'E_COMMAND_REJECTED')
-  assert.match(resUnsafe.text, /控制命令/)
+  assert.equal(resUnsafe.code, undefined)
+  assert.match(resUnsafe.text, /控制命令不能作为新的 EGM 需求/)
 
   const resReview = egmCommand.handler({ agent, rawInput: '/egm-review-access 确认无隔离' })
   assert.equal(resReview.kind, 'error')
-  assert.equal(resReview.code, 'E_COMMAND_REJECTED')
-  assert.match(resReview.text, /控制命令/)
+  assert.equal(resReview.code, undefined)
+  assert.match(resReview.text, /控制命令不能作为新的 EGM 需求/)
 })

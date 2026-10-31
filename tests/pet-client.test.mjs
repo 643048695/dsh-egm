@@ -264,11 +264,60 @@ function fakeDocument() {
       },
       head: { appendChild: (node) => styles.push(node) },
       getElementById: (id) => styles.find((node) => node.id === id) || null,
-      createElement: (tag) => ({ tag, id: '', textContent: '', className: '', setAttribute() {}, parentNode: null, contains: () => false }),
+      // client.js 会 createElement 出 <style>、工作大象容器 div、面板 div 等，并对它们
+      // 读/写 style.*、dataset、className、textContent。缺 style 会直接抛
+      // “Cannot set properties of undefined (setting 'position')”，所以这里按真实
+      // DOM 元素的最小面补齐。
+      createElement: (tag) => ({
+        tag,
+        id: '',
+        textContent: '',
+        className: '',
+        style: {},
+        dataset: {},
+        children: [],
+        parentNode: null,
+        setAttribute(name, value) {
+          this[name] = value
+        },
+        removeAttribute(name) {
+          delete this[name]
+        },
+        appendChild(child) {
+          child.parentNode = this
+          this.children.push(child)
+          return child
+        },
+        removeChild(child) {
+          const index = this.children.indexOf(child)
+          if (index >= 0) this.children.splice(index, 1)
+          child.parentNode = null
+          return child
+        },
+        contains: () => false,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      }),
       addEventListener: events.addEventListener,
       removeEventListener: events.removeEventListener,
       listeners: events.listeners,
       dispatch: events.dispatch,
+    },
+  }
+}
+
+/** 最小 localStorage：真实浏览器有，插件用它记住“启动方式/工作流”。 */
+function storage(initial) {
+  const memory = new Map(Object.entries(initial || {}))
+  return {
+    memory,
+    getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+    setItem: (key, value) => {
+      memory.set(key, String(value))
+    },
+    removeItem: (key) => {
+      memory.delete(key)
     },
   }
 }
@@ -368,9 +417,14 @@ async function loadBundle(options = {}) {
       removeEventListener: windowEvents.removeEventListener,
       listeners: windowEvents.listeners,
       dispatch: windowEvents.dispatch,
+      localStorage: storage(options.launchPreference ? { 'egm.launchMode': options.launchPreference } : undefined),
     },
     document,
     navigator: { language: 'zh-CN' },
+    // 真实浏览器里这些都存在：内联评审的 MutationObserver 会做 `target instanceof Element`，
+    // 启动方式记忆会读写 window.localStorage。缺了它们不是“宿主异常”，而是夹具失真。
+    Element: class Element {},
+    localStorage: storage(),
     ResizeObserver: observers.FakeResizeObserver,
     MutationObserver: observers.FakeMutationObserver,
     setTimeout: (fn, ms) => {
@@ -612,6 +666,11 @@ function workingState(overrides = {}) {
   }
 }
 
+/** 有当前 EGM 任务的状态：0.10 里入口左键据此直达状态面板（snapshot.task 必须带 sessionId）。 */
+function withTask(value) {
+  return Object.assign({ task: { sessionId: 's1', status: 'running' } }, value)
+}
+
 function asTree(mod, react, rpc, extra) {
   const { ctx, registrations } = contextFor(rpc.rpc, extra)
   mod.apply(ctx)
@@ -647,7 +706,7 @@ function petChips(tree) {
 test('客户端包：id、插件名、注册原生左侧工具栏插槽 conversation.input.left', async () => {
   const { entry, mod } = await loadBundle()
   assert.equal(entry.id, 'dsh-egm')
-  assert.deepEqual([...mod.inject], ['slots', 'connection'])
+  assert.deepEqual([...mod.inject], ['slots', 'connection', 'sessions', 'remote', 'remote.commands'])
   const rpc = makeRpc()
   const { ctx, registrations, injected } = contextFor(rpc.rpc)
   mod.apply(ctx)
@@ -669,7 +728,7 @@ test('状态：只读 RPC egm-pet/state，参数带当前 sessionId，并沿用�
   assert.equal(rpc.calls.length, 1)
   assert.equal(
     JSON.stringify(rpc.calls[0]),
-    JSON.stringify(['/api', 'egm-pet/state', { sessionId: 's1' }]),
+    JSON.stringify(['/api', 'egm-pet/state', { sessionId: 's1', wantEvidence: true }]),
   )
   assert.equal(timers.length, 1)
   assert.equal(timers[0].ms, 1200)
@@ -698,7 +757,14 @@ test('状态：中断后保留最近一次成功数据并标明“已中断”',
     if (fail) throw new Error('后端断开')
     return {
       ok: true,
-      value: { sessionId: 's1', state: 'idle', count: 2, goldfish: [], elephant: { status: 'idle', known: true } },
+      value: {
+        sessionId: 's1',
+        state: 'idle',
+        count: 2,
+        goldfish: [],
+        task: { sessionId: 's1', status: 'running' },
+        elephant: { status: 'idle', known: true },
+      },
     }
   })
   const { Dock } = asTree(mod, react, rpc)
@@ -711,8 +777,7 @@ test('状态：中断后保留最近一次成功数据并标明“已中断”',
   await settle()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.match(findByClass(tree, 'egm-chip').props.title, /后端断开|最近一次/)
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   assert.match(textOf(findById(tree, 'egm-mode-panel')), /状态断了/)
 })
 
@@ -905,6 +970,7 @@ test('干活时：只有真在跑的角色出现；未知状态不冒充在工�
       state: 'prep',
       count: 0,
       goldfish: [],
+      task: { sessionId: 's1', status: 'running' },
       elephant: { status: 'unknown', known: false, reason: 'no-status-event' },
     },
   }))
@@ -913,8 +979,7 @@ test('干活时：只有真在跑的角色出现；未知状态不冒充在工�
   await settle()
   const tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(findByClass(tree, 'egm-pet-chip'), null)
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  const panel = react.render(Dock, { sessionId: 's1' })
+  const panel = openStatusPanel(react, Dock)
   assert.match(textOf(findById(panel, 'egm-mode-panel')), /状态未知/)
 })
 
@@ -984,15 +1049,22 @@ test('点外部：收起卡片，不提交也不停止任务', async () => {
   const rpc = makeRpc()
   rpc.set(async () => ({
     ok: true,
-    value: { sessionId: 's1', state: 'dispatch', count: 1, goldfish: [], elephant: { status: 'running', known: true, working: true } },
+    value: {
+      sessionId: 's1',
+      state: 'dispatch',
+      count: 1,
+      goldfish: [],
+      task: { sessionId: 's1', status: 'running' },
+      elephant: { status: 'running', known: true, working: true },
+    },
   }))
   const store = composer()
   const { Dock } = asTree(mod, react, rpc, { conversation: store.conversation })
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  assert.ok(findById(react.render(Dock, { sessionId: 's1' }), 'egm-mode-panel'))
+  tree = openStatusPanel(react, Dock)
+  assert.ok(findById(tree, 'egm-mode-panel'))
 
   sandbox.document.dispatch('pointerdown', { target: {} })
   tree = react.render(Dock, { sessionId: 's1' })
@@ -1005,15 +1077,22 @@ test('点内部：点击面板内部或工具栏触发器不误关面板（doubl
   const rpc = makeRpc()
   rpc.set(async () => ({
     ok: true,
-    value: { sessionId: 's1', state: 'dispatch', count: 1, goldfish: [], elephant: { status: 'running', known: true, working: true } },
+    value: {
+      sessionId: 's1',
+      state: 'dispatch',
+      count: 1,
+      goldfish: [],
+      task: { sessionId: 's1', status: 'running' },
+      elephant: { status: 'running', known: true, working: true },
+    },
   }))
   const store = composer()
   const { Dock } = asTree(mod, react, rpc, { conversation: store.conversation })
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  assert.ok(findById(react.render(Dock, { sessionId: 's1' }), 'egm-mode-panel'))
+  tree = openStatusPanel(react, Dock)
+  assert.ok(findById(tree, 'egm-mode-panel'))
 
   // 点击面板内部（panelRef.current.contains(target) === true）
   sandbox.document.dispatch('pointerdown', { target: dom.panelNode })
@@ -1034,8 +1113,7 @@ async function openLaunchAndType(react, Dock, text) {
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   findById(tree, 'egm-launch-draft').props.onChange({ target: { value: text } })
   tree = react.render(Dock, { sessionId: 's1' })
   await buttonByText(tree, '启动 EGM').props.onClick()
@@ -1063,6 +1141,7 @@ test('金鱼卡片：列表来自真实 goldfish，报告按需 RPC 并显示正
         value: {
           sessionId: 's1',
           state: 'crit',
+          task: { sessionId: 's1', status: 'running' },
           count: 1,
           goldfish: [
             {
@@ -1103,8 +1182,7 @@ test('金鱼卡片：列表来自真实 goldfish，报告按需 RPC 并显示正
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
   // 全部跑完时没有金鱼宠物，结果从入口卡的“查看评审记录”进。
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   await buttonByText(tree, '查看评审记录（1 条）').props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
   const fishRow = findByClass(tree, 'egm-fish')
@@ -1135,6 +1213,7 @@ test('金鱼卡片：报告回包 id 对不上就丢弃，不当成这条鱼的�
         value: {
           sessionId: 's1',
           state: 'crit',
+          task: { sessionId: 's1', status: 'running' },
           count: 1,
           goldfish: [{ id: 'g1', role: 'logic', status: 'done', hasReport: true, reportPath: '.egm/report.md' }],
         },
@@ -1146,8 +1225,7 @@ test('金鱼卡片：报告回包 id 对不上就丢弃，不当成这条鱼的�
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   await buttonByText(tree, '查看评审记录（1 条）').props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
   await buttonByText(tree, '读取报告').props.onClick()
@@ -1167,6 +1245,7 @@ test('金鱼卡片：内存回退和截断都明确告知，不当成磁盘完�
         value: {
           sessionId: 's1',
           state: 'crit',
+          task: { sessionId: 's1', status: 'running' },
           count: 1,
           goldfish: [{ id: 'g1', role: 'style', status: 'done', hasReport: true, reportPath: '.egm/report.md' }],
         },
@@ -1189,8 +1268,7 @@ test('金鱼卡片：内存回退和截断都明确告知，不当成磁盘完�
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   await buttonByText(tree, '查看评审记录（1 条）').props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
   await buttonByText(tree, '读取报告').props.onClick()
@@ -1205,13 +1283,12 @@ test('金鱼卡片：内存回退和截断都明确告知，不当成磁盘完�
 test('状态：后端没给 gate 时显示“暂不可用”，不冒充未打开', async () => {
   const { mod, react } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   assert.match(textOf(findById(tree, 'egm-mode-panel')), /派发窗口状态暂不可用/)
 })
 
@@ -1220,14 +1297,13 @@ test('闸门：关闭时 expiresAt:0 不显示 1970 或“到期时间”', asyn
   const rpc = makeRpc()
   rpc.set(async () => ({
     ok: true,
-    value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [], gate: { open: false, remaining: 0, expiresAt: 0 } },
+    value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [], gate: { open: false, remaining: 0, expiresAt: 0 } }),
   }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   const text = textOf(findById(tree, 'egm-mode-panel'))
   assert.match(text, /派发窗口未打开/)
   assert.equal(text.includes('1970'), false)
@@ -1262,40 +1338,48 @@ test('没有 sessionId 时不渲染、不请求', async () => {
 
 // ---- 行为：进度卡变化要重新量，放不下就不开面板 ---------------------------
 
-test('行为：进度卡变高时重新量天花板，面板底边跟着上移', async () => {
+test('行为：进度卡变高把入口顶上去，面板重新量并跟着上移', async () => {
   const { mod, react, dom, observers } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
-  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '276px', '进度卡 60px 高时贴它上沿')
+  tree = openStatusPanel(react, Dock)
+  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '176px', '默认：入口在输入卡上方 40px，面板贴它上沿')
 
-  dom.state.seat = Object.assign({}, dom.state.seat, { top: 400, height: 300 })
+  // 进度卡长高 → 输入卡整体上移 → 入口跟着上移；resize 后必须重新量，不能留旧坐标。
+  dom.state.card = Object.assign({}, dom.state.card, { top: 460 })
   for (const observer of observers.instances.filter((item) => item.kind === 'resize')) observer.fire()
   tree = react.render(Dock, { sessionId: 's1' })
-  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '376px', '进度卡长高后要重新让位')
+  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '276px', '入口上移后重新量，面板跟着上移')
 })
 
 test('行为：进度卡被移除（MutationObserver）后回到贴输入框上方', async () => {
   const { mod, react, dom, observers } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
-  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '276px')
+  tree = openStatusPanel(react, Dock)
+  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '176px')
 
-  dom.state.seat = Object.assign({}, dom.state.seat, { top: 560, height: 140 })
-  for (const observer of observers.instances.filter((item) => item.kind === 'mutation')) observer.fire()
+  // 进度卡被移除 → 输入卡落回视口底部 → 入口跟着下移，mutation 后必须重新量。
+  dom.state.card = Object.assign({}, dom.state.card, { top: 600 })
+  const dockMutation = observers.instances.filter(
+    (item) => item.kind === 'mutation' && (item.targets || []).some(
+      (target) => target === dom.seatNode || target === dom.cardNode || target === dom.stackNode,
+    ),
+  )
+  assert.ok(dockMutation.length > 0, '注册了盯 composer 的 MutationObserver')
+  for (const observer of dockMutation) {
+    observer.fire([{ target: dom.stackTarget, addedNodes: [], removedNodes: [{ nodeType: 1 }] }])
+  }
   tree = react.render(Dock, { sessionId: 's1' })
-  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '216px', '没有进度卡时贴输入框')
+  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '136px', '没有进度卡时入口更靠下，面板跟着下移')
 })
 
 test('行为：上方空间受限时向下翻转，不 blocked 并正常展开面板', async () => {
@@ -1308,21 +1392,20 @@ test('行为：上方空间受限时向下翻转，不 blocked 并正常展开�
     },
   })
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(findByClass(tree, 'egm-float').props['data-panel-mode'], 'below', '上方空间紧而下方充裕时自动翻转到下方')
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   const panel = findById(tree, 'egm-mode-panel')
   assert.ok(panel, '向下翻转后可正常展开面板，绝不 blocked')
   assert.equal(panel.props['data-mode'], 'below')
 })
 
 test('行为：切换会话时观察器被断开，不留下监听', async () => {
-  const { mod, react, observers } = await loadBundle()
+  const { mod, react, dom, observers } = await loadBundle()
   const rpc = makeRpc()
   rpc.set(async (channel, method, payload) => ({
     ok: true,
@@ -1332,15 +1415,16 @@ test('行为：切换会话时观察器被断开，不留下监听', async () =>
   react.render(Dock, { sessionId: 's1' })
   await settle()
   react.render(Dock, { sessionId: 's1' })
-  const created = observers.instances.length
-  assert.ok(created >= 2, '应同时盯输入卡片和整个 stack')
+  // 只看会话级（盯 composer 的）观察器：模块级的评审观察器不属于会话生命周期。
+  const dockObservers = observers.instances.filter(
+    (item) => item.kind === 'resize' || (item.targets || []).some(
+      (target) => target === dom.seatNode || target === dom.cardNode || target === dom.stackNode,
+    ),
+  )
+  assert.ok(dockObservers.length >= 2, '应同时盯输入卡片和整个 stack')
   react.render(Dock, { sessionId: 's2' })
   await settle()
-  assert.equal(
-    observers.instances.slice(0, created).every((item) => item.disconnected),
-    true,
-    '换会话要断开旧观察器',
-  )
+  assert.equal(dockObservers.every((item) => item.disconnected), true, '换会话要断开旧观察器')
 })
 
 // ---- 几何：浮动层不能改宿主布局 -------------------------------------------
@@ -1418,25 +1502,30 @@ test('几何：底部条也被占满时返回 null，宁可暂时不显示也不
   assert.equal(dock, null)
 })
 
-test('行为：量不到输入卡片时面板保持收起，不凭猜想弹出', async () => {
+test('行为：量不到输入卡片时，面板改贴入口按钮，不拿猜的卡片坐标', async () => {
   const { mod, react } = await loadBundle({ dom: { noCard: true } })
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
   const chip = findByClass(tree, 'egm-chip')
   assert.ok(chip, '工具栏入口按钮存在')
-  chip.props.onContextMenu()
+  chip.props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
-  assert.ok(findById(tree, 'egm-mode-panel'), 'card 缺失但按钮可测仍开')
+  const panel = findById(tree, 'egm-mode-panel')
+  assert.ok(panel, '卡片量不到，但按钮可测就仍然展开')
+  assert.equal(panel.props.style.left, '120px', '横向对齐按钮，不去猜卡片左边')
+  // 贴在按钮上方时锚点走 bottom（768 - 132 - 460），top 只留给翻到下方的情况。
+  assert.equal(panel.props.style.bottom, '176px', '纵向贴按钮上沿：768 - (600 - 8 - 460) - 460')
+  assert.equal(panel.props['data-mode'], 'above', '按钮上方放得下就在上方展开')
 })
 
-test('行为：空间不足时面板 blocked，不覆盖进度卡', async () => {
+test('行为：上方空间不足时面板翻到按钮下方展开，不 blocked', async () => {
   const { mod, react, dom } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
@@ -1445,7 +1534,7 @@ test('行为：空间不足时面板 blocked，不覆盖进度卡', async () => 
   dom.state.seat = { left: 120, top: 40, right: 920, bottom: 180, width: 800, height: 140 }
   let tree = react.render(Dock, { sessionId: 's1' })
   const chip = findByClass(tree, 'egm-chip')
-  chip.props.onContextMenu()
+  chip.props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
   const panel = findById(tree, 'egm-mode-panel')
   assert.ok(panel, '上方空间不足时向下翻转展开，不 blocked')
@@ -1492,15 +1581,18 @@ test('几何：卡片与输入卡同宽同左、不越过发送键那一列，�
 
 
 
-test('几何：有进度卡时，面板贴到进度卡上沿，不压它也不压输入卡', async () => {
+test('几何：面板只认按钮/卡片锚点，进度卡上沿不再参与定位', async () => {
   const { mod } = await loadBundle()
   const card = { left: 120, top: 560, right: 920, bottom: 700, width: 800, height: 140 }
   const stack = { left: 120, top: 500, right: 920, bottom: 700, width: 800, height: 200 }
   const geometry = mod.__test.choosePanelGeometry({ card, dockCeiling: stack.top, viewport: { width: 1200, height: 800 } })
   assert.equal(geometry.mode, 'above')
-  assert.equal(geometry.offsetBottom, card.top - stack.top + 8, '底边落在进度卡上沿 8px')
-  assert.equal(card.top - geometry.offsetBottom, stack.top - 8, '面板底边在进度卡上方')
-  assert.ok(geometry.maxHeight <= stack.top - 16)
+  assert.equal(geometry.offsetBottom, 8, '面板底边与卡片上沿留 8px，不再被进度卡上沿顶住')
+  assert.equal(card.top - geometry.offsetBottom, 552, '面板底边 = 卡片上沿 - 8')
+  assert.equal(geometry.maxHeight, 460, '高度按视口可用空间算，不看进度卡')
+  // 0.10：dockCeiling 是历史遗留参数，传什么都不该改变结果。
+  const withoutDock = mod.__test.choosePanelGeometry({ card, viewport: { width: 1200, height: 800 } })
+  assert.deepEqual(geometry, withoutDock)
 })
 
 test('几何：上方放不下就向下翻转并夹在视口内（替代已废弃的侧栏模式）', async () => {
@@ -1520,23 +1612,25 @@ test('几何：上方放不下就向下翻转并夹在视口内（替代已废�
 
 test('几何：四周都挤就压成精简卡；再小整卡滚动，仍保留正文', async () => {
   const { mod } = await loadBundle()
-  const card = { left: 40, top: 500, right: 400, bottom: 640, width: 360, height: 140 }
+  // 视口只有 300 高：上下都挤，可用高度 184 → 精简卡（整卡可滚动）。
   const compact = mod.__test.choosePanelGeometry({
-    card,
-    dockCeiling: 200,
-    viewport: { width: 440, height: 700 },
+    card: { left: 40, top: 200, right: 400, bottom: 240, width: 360, height: 40 },
+    viewport: { width: 440, height: 300 },
   })
   assert.equal(compact.mode, 'compact')
-  assert.ok(compact.maxHeight <= 200)
+  assert.equal(compact.maxHeight, 184)
+  assert.ok(compact.maxHeight >= 140 && compact.maxHeight < 240, '仍落在能读正文的区间')
   assert.match(compact.note, /整张卡片可滚动/)
 
+  // 视口只有 200 高：可用高度 124 → 最小档，但绝不 hidden、也绝不只剩标题条。
   const minimal = mod.__test.choosePanelGeometry({
-    card,
-    dockCeiling: 100,
-    viewport: { width: 440, height: 700 },
+    card: { left: 40, top: 140, right: 400, bottom: 180, width: 360, height: 40 },
+    viewport: { width: 440, height: 200 },
   })
   assert.equal(minimal.mode, 'minimal')
-  assert.equal(minimal.maxHeight, 84, '使用可用高度，不能只剩48px标题条')
+  assert.equal(minimal.maxHeight, 124, '用尽可用高度，不能只剩48px标题条')
+  assert.ok(minimal.fixedTop >= 8, '仍夹在视口内')
+  assert.ok(minimal.fixedTop + minimal.maxHeight <= 200 - 8)
   assert.match(minimal.note, /整张卡片可滚动/)
 })
 
@@ -1620,44 +1714,46 @@ test('几何：座位量不到时面板直接 hidden，不拿视口猜位置', a
   assert.equal(mod.__test.choosePanelGeometry({ card: zeroCard, trigger: null, viewport: { width: 900, height: 700 } }).mode, 'hidden')
 })
 
-test('几何：面板贴的是含进度卡的 composer 区上沿，不会插在进度卡和输入框之间', async () => {
+test('几何：面板以按钮为锚点，不会插在进度卡和输入框之间乱猜', async () => {
   const { mod } = await loadBundle()
   const card = { left: 120, top: 560, right: 920, bottom: 700, width: 800, height: 140 }
-  const seat = { left: 120, top: 500, right: 920, bottom: 700, width: 800, height: 200 }
+  const trigger = { left: 120, top: 600, right: 275, bottom: 626, width: 155, height: 26 }
   const dock = { left: 340, top: 500, right: 700, bottom: 552, width: 360, height: 52 }
-  const geometry = mod.__test.choosePanelGeometry({ card, dockCeiling: dock.top, viewport: { width: 1200, height: 800 } })
+  const geometry = mod.__test.choosePanelGeometry({ card, trigger, dockCeiling: dock.top, viewport: { width: 1200, height: 800 } })
   assert.equal(geometry.mode, 'above')
-  const panelBottom = card.top - geometry.offsetBottom
-  assert.ok(panelBottom <= dock.top, '面板底边不超过进度卡上沿')
+  assert.equal(geometry.fixedTop, 132, '面板顶边 = 按钮顶 600 - gap 8 - 高 460')
+  assert.equal(geometry.fixedLeft, 120, '与按钮左对齐')
+  // 锚点是按钮：进度卡上沿参与与否都不改变结果。
+  const withoutDock = mod.__test.choosePanelGeometry({ card, trigger, viewport: { width: 1200, height: 800 } })
+  assert.deepEqual(geometry, withoutDock)
 })
 
 test('结构：原生左侧工具栏插槽渲染入口按钮，面板通过 Portal 挂载 document.body', async () => {
   const { mod, react } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
   const chip = findByClass(tree, 'egm-chip')
   assert.ok(chip, '入口按钮在工具栏中渲染')
-  chip.props.onContextMenu()
+  chip.props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
   const panel = findById(tree, 'egm-mode-panel')
-  assert.ok(panel, '点击后展开 launch 面板')
+  assert.ok(panel, '有当前任务时点入口展开状态面板')
   assert.equal(panel.props.style.position, 'fixed', '采用 fixed 视口绝对定位摆脱 Claude 容器裁剪')
 })
 
 test('行为：已打开后座位不可测，面板安全收起而不是凭旧坐标硬撑', async () => {
   const { mod, react, dom } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   assert.ok(findById(tree, 'egm-mode-panel'), '先确认面板已经打开')
 
   dom.state.card = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
@@ -1672,13 +1768,12 @@ test('行为：已打开后座位不可测，面板安全收起而不是凭旧�
 test('Esc：输入法选词中（isComposing / keyCode 229）不关面板、不拦事件', async () => {
   const { mod, react, sandbox } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'state', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'state', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   assert.ok(findById(tree, 'egm-mode-panel'))
 
   const composing = { key: 'Escape', isComposing: true, preventDefault() { this.prevented = true }, stopPropagation() { this.stopped = true } }
@@ -1708,13 +1803,12 @@ test('Esc：输入法选词中（isComposing / keyCode 229）不关面板、不�
 test('Esc：组件自己的 onKeyDown 在选词中也不关面板', async () => {
   const { mod, react } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'state', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'state', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   const panel = findById(tree, 'egm-mode-panel')
   assert.ok(panel)
   const composing = { key: 'Escape', isComposing: true, preventDefault() { this.prevented = true }, stopPropagation() {} }
@@ -1735,6 +1829,7 @@ test('状态：断线后保留历史数据，但不放宠物动画、一个灯�
         sessionId: 's1',
         state: 'dispatch',
         count: 3,
+        task: { sessionId: 's1', status: 'running' },
         goldfish: [{ id: 'g1', role: 'logic', status: 'running' }],
         elephant: { status: 'working', known: true, working: true, workingOnEgm: true },
       },
@@ -1754,11 +1849,14 @@ test('状态：断线后保留历史数据，但不放宠物动画、一个灯�
   assert.equal(chipDot(tree), null, '断了连绿点都不留：绿点只代表真实 EGM 活动')
   assert.equal(findByClass(tree, 'egm-pet-chip'), null, 'stale 时宠物收起，不再继续动画')
   assert.match(textOf(findByClass(tree, 'egm-chip')), /3/, '历史条数如实保留')
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
+  tree = openStatusPanel(react, Dock)
   const panel = findById(tree, 'egm-mode-panel')
   assert.match(textOf(panel), /状态断了/, '面板如实标注断线')
-  assert.ok(containsNode(statusDetails(panel), findByClass(panel, 'egm-warn')), '断线说明也在折叠区里')
+  // 断线说明在「状态明细」那个折叠区里（ModePanel 现在有多个 details，不能只取第一个）。
+  const warn = findByClass(panel, 'egm-warn')
+  assert.ok(warn, '断线说明要渲染成警告')
+  const statusBox = findAll(panel, (node) => node.type === 'details').find((node) => containsNode(node, warn))
+  assert.ok(statusBox, '断线说明也在折叠区里')
 })
 
 test('状态：空闲或没有真实 EGM 活动时，入口不亮绿点', async () => {
@@ -1907,7 +2005,7 @@ test('几何：跨行高 textarea 挡死控制行时，底部条兜底也不碰�
 test('观察器：subtree 覆盖深层进度卡，但过滤掉自己渲染的节点', async () => {
   const { mod, react, observers } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
@@ -1946,28 +2044,33 @@ test('观察器：subtree 覆盖深层进度卡，但过滤掉自己渲染的节
 test('行为：座位尺寸不变但深层进度卡插进来，也能触发重测', async () => {
   const { mod, react, dom, observers } = await loadBundle()
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-chip').props.onContextMenu()
-  tree = react.render(Dock, { sessionId: 's1' })
-  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '276px')
+  tree = openStatusPanel(react, Dock)
+  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '176px')
 
   // 座位高度不变，但内部多了一张进度卡：只有 subtree 的 mutation 记录能看到它。
   dom.state.card = Object.assign({}, dom.state.card, { top: 620 })
-  dom.state.seat = Object.assign({}, dom.state.seat, { top: 460 })
-  const mutation = observers.instances.find((item) => item.kind === 'mutation')
-  mutation.fire([{ target: dom.stackTarget, addedNodes: [{ nodeType: 1 }], removedNodes: [] }])
+  const dockMutation = observers.instances.filter(
+    (item) => item.kind === 'mutation' && (item.targets || []).some(
+      (target) => target === dom.seatNode || target === dom.cardNode || target === dom.stackNode,
+    ),
+  )
+  assert.ok(dockMutation.length > 0)
+  for (const observer of dockMutation) {
+    observer.fire([{ target: dom.stackTarget, addedNodes: [{ nodeType: 1 }], removedNodes: [] }])
+  }
   tree = react.render(Dock, { sessionId: 's1' })
-  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '316px', '深层插入触发重测')
+  assert.equal(findById(tree, 'egm-mode-panel').props.style.bottom, '116px', '深层插入触发重测')
 })
 
 test('观察器：同一帧内多次变化只重测一次，卸载时取消排队', async () => {
   const { mod, react, observers, frames, flushFrame } = await loadBundle({ raf: true })
   const rpc = makeRpc()
-  rpc.set(async () => ({ ok: true, value: { sessionId: 's1', state: 'idle', count: 0, goldfish: [] } }))
+  rpc.set(async () => ({ ok: true, value: withTask({ sessionId: 's1', state: 'idle', count: 0, goldfish: [] }) }))
   const { Dock } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
@@ -2004,7 +2107,7 @@ test('挂载：没有轮询结果或观察器事件也会主动重测一次', as
   assert.equal(flushFrame(), 1)
   assert.equal(react.updates, before + 1, '挂载测量触发真实 state 更新')
   const ready = react.render(Dock, { sessionId: 's1' })
-  assert.equal(ready.props['data-egm-version'], '0.8.3')
+  assert.equal(ready.props['data-egm-version'], '0.8.6')
   assert.equal(ready.props['data-egm-anchor'], 'ready')
   assert.notEqual(ready.props['data-panel-mode'], 'hidden')
   assert.equal(frames.length, 0, '重渲染自身不得重复排队')
@@ -2037,8 +2140,11 @@ test('恢复：初次无卡片，后插入与替换都会重新绑定观察器',
   flushFrame()
   let tree = react.render(Dock, { sessionId: 's1' })
   assert.notEqual(tree.props['data-panel-mode'], 'hidden', '卡片缺失但按钮可测仍可定位')
-  const mutation = observers.instances.find((item) => item.kind === 'mutation')
+  const mutation = observers.instances.find(
+    (item) => item.kind === 'mutation' && (item.targets || []).includes(dom.seatNode),
+  )
   const resize = observers.instances.find((item) => item.kind === 'resize')
+  assert.ok(mutation, '注册了盯 composer 的 MutationObserver')
   assert.ok(mutation.targets.includes(dom.seatNode), '盯稳定 seat，不能只盯尚不存在的 card')
   dom.state.noCard = false
   mutation.fire([{ target: dom.seatNode, addedNodes: [{ nodeType: 1 }], removedNodes: [] }])
@@ -2065,7 +2171,7 @@ test('提示：定位失败与发送接口错误都不再误称放不下', async
   tree = react.render(Dock, { sessionId: 's1' })
   assert.match(textOf(findByClass(tree, 'egm-chip')), /定位失败/)
   assert.doesNotMatch(textOf(findByClass(tree, 'egm-chip')), /放不下/)
-  assert.match(findByClass(tree, 'egm-chip').props.title, /0\.8\.3.*量不到/)
+  assert.match(findByClass(tree, 'egm-chip').props.title, /0\.8\.6.*量不到/)
   assert.equal(mod.__test.entryNoticeLabel('宿主接口出现异常'), '查看提示')
 })
 
@@ -2093,6 +2199,30 @@ function clickChip(react, Dock, sessionId = 's1', handler = 'onClick', options =
     findByClass(tree, 'egm-option').props.onClick()
     tree = react.render(Dock, { sessionId })
   }
+  return react.render(Dock, { sessionId })
+}
+
+/** 0.10 入口语义：有当前 EGM 任务时，左键点入口直接开状态面板；
+ *  没有任务时先弹「选择启动方式」，选完再点一次才轮到状态面板。 */
+function openStatusPanel(react, Dock, sessionId = 's1') {
+  let tree = react.render(Dock, { sessionId })
+  findByClass(tree, 'egm-chip').props.onClick()
+  tree = react.render(Dock, { sessionId })
+  if (findById(tree, 'egm-choose-panel')) {
+    findByClass(tree, 'egm-option').props.onClick()
+    tree = react.render(Dock, { sessionId })
+    findByClass(tree, 'egm-chip').props.onClick()
+    tree = react.render(Dock, { sessionId })
+  }
+  return tree
+}
+
+/** 0.10：模式开着时点入口只是开关面板；真正关模式要点面板里的「取消本次启动」。 */
+function closeMode(react, Dock, sessionId = 's1') {
+  const tree = openStatusPanel(react, Dock, sessionId)
+  const toggle = buttonByText(tree, '取消本次启动')
+  assert.ok(toggle, '模式开着时，面板里必须有「取消本次启动」按钮')
+  toggle.props.onClick()
   return react.render(Dock, { sessionId })
 }
 
@@ -2140,7 +2270,8 @@ test('模式：输入框已有别的命令时不覆盖，标记标 stale 也不�
 test('模式：关闭只摘掉 /egm 标记，用户文字留着，也不发送', async () => {
   const { react, store, Dock } = await modeScene({ draft: '帮我审一下图纸' })
   clickChip(react, Dock)
-  const tree = clickChip(react, Dock)
+  // 0.10 入口左键在有模式时只开合面板，关模式要走面板里的「取消本次启动」。
+  const tree = closeMode(react, Dock)
   assert.equal(store.getDraft(), '帮我审一下图纸')
   assert.equal(store.getCommand(), null)
   assert.equal(findByClass(tree, 'egm-mode-mark'), null, '关掉模式，标记必须消失')
@@ -2174,7 +2305,7 @@ test('模式：chip 还没恢复就关模式，残留的 /egm 前缀也要清干
   assert.equal(store.getDraft(), '/egm 帮我审图纸', '开模式加前缀')
   assert.equal(store.getCommand(), null, '宿主还没恢复 chip，属于 pending')
 
-  const tree = clickChip(react, Dock)
+  const tree = closeMode(react, Dock)
   assert.equal(store.getDraft(), '帮我审图纸', '关模式把 pending 的 /egm 也摘掉，用户文字留着')
   assert.equal(store.getCommand(), null)
   assert.equal(findByClass(tree, 'egm-mode-mark'), null)
@@ -2193,7 +2324,7 @@ test('模式：开了立刻关（chip 还没恢复）原文、引用、附件都
   assert.equal(store.getDraft(), '/egm 帮我审图纸', '开模式只加前缀')
   assert.equal(store.getReferences()[0].offset, 7, '引用跟着整体 +5')
 
-  const tree = clickChip(react, Dock)
+  const tree = closeMode(react, Dock)
   assert.equal(store.getDraft(), '帮我审图纸', '关模式把插件自己加的前缀摘干净')
   assert.equal(store.getReferences()[0].offset, 2, '引用回到原偏移')
   assert.deepEqual(store.attachments.ids.slice(), ['a1', 'a2'], '附件一个不动')
@@ -2203,7 +2334,7 @@ test('模式：开了立刻关（chip 还没恢复）原文、引用、附件都
 test('模式：用户自己写的 /egm 不替人删，关模式后如实说明仍会走 EGM', async () => {
   const { react, store, Dock } = await modeScene({ draft: '/egm 帮我审图纸', composer: { command: '/egm ' } })
   clickChip(react, Dock)
-  const tree = clickChip(react, Dock)
+  const tree = closeMode(react, Dock)
 
   assert.equal(store.getDraft(), '/egm 帮我审图纸', '用户自己的文字一个字都不动')
   assert.equal(store.getCommand(), null, 'chip 摘掉')
@@ -2222,7 +2353,7 @@ test('模式：关模式时宿主没真正摘掉 chip，就留在模式里并提
   clickChip(react, Dock)
   assert.equal(store.getCommand(), '/egm ', '开模式装上了 chip')
 
-  const tree = clickChip(react, Dock)
+  const tree = closeMode(react, Dock)
   assert.equal(store.getDraft(), '/egm 帮我审图纸', '摘不掉就不动草稿')
   assert.equal(store.getCommand(), '/egm ', 'chip 还在，下一次发送仍会走 EGM')
   assert.ok(findByClass(tree, 'egm-mode-mark'), '模式仍然开着')
@@ -2265,9 +2396,12 @@ test('模式：标记被删掉后按新草稿补回，收起面板不等于关�
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(store.getDraft(), '/egm 乙', '标记被删后按当前草稿补回')
 
-  tree = clickChip(react, Dock, 's1', 'onContextMenu')
-  assert.ok(findById(tree, 'egm-mode-panel'), '右键入口打开状态面板')
-  buttonByText(tree, '收起').props.onClick()
+  tree = openStatusPanel(react, Dock)
+  assert.ok(findById(tree, 'egm-mode-panel'), '入口打开状态面板')
+  // 关闭按钮只有图标，靠 aria-label 找。
+  const collapse = findAll(tree, (node) => node.props && node.props['aria-label'] === '收起卡片')[0]
+  assert.ok(collapse, '面板头部有收起按钮')
+  collapse.props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(findByClass(tree, 'egm-panel'), null)
   assert.ok(findByClass(tree, 'egm-mode-mark'), '收起面板不等于关模式')
@@ -2276,12 +2410,13 @@ test('模式：标记被删掉后按新草稿补回，收起面板不等于关�
 
 test('模式：面板里没有独立输入框和“启动 EGM”按钮，只有开关和状态', async () => {
   const { react, Dock } = await modeScene()
-  const tree = clickChip(react, Dock, 's1', 'onContextMenu')
+  const tree = openStatusPanel(react, Dock)
   const panel = findById(tree, 'egm-mode-panel')
   assert.ok(panel)
   assert.equal(findById(tree, 'egm-launch-draft'), null, '不再有独立输入框')
   assert.ok(!textOf(panel).includes('启动 EGM'), '不再有启动按钮')
-  assert.ok(textOf(panel).includes('开启大象模式'))
+  // openStatusPanel 会先选「对话框方式」进入模式，所以面板上的开关是「取消本次启动」。
+  assert.ok(buttonByText(tree, '取消本次启动'), '只有模式开关，没有独立启动按钮')
   assert.equal(statusDetails(panel).props.open, undefined, '状态默认折叠')
 })
 
@@ -2450,9 +2585,11 @@ test('模式：标记挂上后 submit 照常放行，关掉模式立刻恢复原
   assert.equal(store.calls.filter((call) => call[0] === 'submit').length, 1, 'claimed 状态下交给宿主走 /egm')
   assert.equal(store.getCommand(), '/egm ', '发完之后模式还开着，chip 重新挂上等下一条')
 
-  const again = await modeScene({ draft: '乙', composer: { ignoreSetDraft: true } })
+  const again = await modeScene({ draft: '乙' })
   clickChip(again.react, again.Dock)
-  clickChip(again.react, again.Dock) // 再点一次 = 关模式
+  assert.notEqual(again.store.shell.submit, again.store.protoSubmit, '模式开着时 submit 被闸门包着')
+  // 0.10 关模式走面板里的「取消本次启动」，入口左键只负责开合面板。
+  closeMode(again.react, again.Dock)
   assert.equal(again.store.shell.submit, again.store.protoSubmit, '关掉模式后立刻还原原生 submit')
   again.store.shell.submit('queue', 'enter')
   assert.equal(again.store.calls.filter((call) => call[0] === 'submit').length, 1, '普通消息照常发')
@@ -2679,7 +2816,7 @@ test('模式：闸门被换掉到被发现之间的一次发送会绕过（如�
   assert.equal(findByClass(tree, 'egm-mode-mark'), null, '发现后立刻关模式')
 })
 
-test('启动方式：记住的选择要能存、能读、读不出就当没选过', async () => {
+test('启动方式：记住的选择要能存、能读，读不出时回落到本会话上一次的选择', async () => {
   const { readLaunchPreference, writeLaunchPreference } = await loadBundle().then((r) => r.mod.__test)
   const memory = new Map()
   const storage = {
@@ -2693,11 +2830,13 @@ test('启动方式：记住的选择要能存、能读、读不出就当没选�
   assert.equal(writeLaunchPreference('card', storage), true)
   assert.equal(readLaunchPreference(storage), 'card')
 
+  // 0.10：读到不认识的值不判 null，而是回落到本会话里最后一次的有效选择。
   memory.set('egm.launchMode', 'fish')
-  assert.equal(readLaunchPreference(storage), null, '不认识的值当没选过')
+  assert.equal(readLaunchPreference(storage), 'card', '不认识的值回落上一次的选择')
   memory.set('egm.launchMode', '')
-  assert.equal(readLaunchPreference(storage), null)
+  assert.equal(readLaunchPreference(storage), 'card')
   memory.clear()
+  assert.equal(readLaunchPreference(storage), 'card', '读不到也回落上一次的选择')
   assert.equal(writeLaunchPreference('whatever', storage), false, '非法值不写')
 
   const broken = {
@@ -2708,7 +2847,7 @@ test('启动方式：记住的选择要能存、能读、读不出就当没选�
       throw new Error('boom')
     },
   }
-  assert.equal(readLaunchPreference(broken), null, '读取抛错当没选过，不让设置页崩')
+  assert.equal(readLaunchPreference(broken), 'card', '读取抛错也回落上一次的选择，不让设置页崩')
   assert.equal(writeLaunchPreference('card', broken), false, '写入抛错返回 false（下次再问一次）')
 })
 
@@ -2765,7 +2904,7 @@ test('入口：没记住过选择时先弹选择卡；选「卡片方式」开�
   assert.ok(chooser, '第一次点入口：先问用哪种方式')
   assert.ok(textOf(chooser).includes('对话框方式'), '列出了对话框方式')
   assert.ok(textOf(chooser).includes('卡片方式'), '列出了卡片方式')
-  assert.ok(textOf(chooser).includes('不再提示'), '带「不再提示」勾选')
+  assert.ok(textOf(chooser).includes('选择后自动记住，下次直接进入。'), '说明选择会自动记住，不再有勾选框')
   assert.equal(findByClass(tree, 'egm-mode-mark'), null, '还没选方式，不进大象模式')
 
   const optionButtons = collectByClass(tree, 'egm-option')
@@ -2781,7 +2920,7 @@ test('入口：没记住过选择时先弹选择卡；选「卡片方式」开�
   assert.equal(store.calls.filter((call) => call[0] === 'submit').length, 0, '开卡片不发送')
 })
 
-test('入口：勾选「不再提示」记住对话框方式后，再点入口直接进模式不再问', async () => {
+test('入口：选择会自动记住；关掉模式后再点入口直接进模式不再问', async () => {
   const { react, store, Dock, sandbox } = await modeScene({ draft: '甲' })
   const memory = new Map()
   sandbox.window.localStorage = {
@@ -2792,15 +2931,19 @@ test('入口：勾选「不再提示」记住对话框方式后，再点入口�
   findByClass(tree, 'egm-chip').props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
 
-  const checkbox = findByClass(tree, 'egm-check').children[0]
-  checkbox.props.onChange({ target: { checked: true } })
-  tree = react.render(Dock, { sessionId: 's1' })
-  findByClass(tree, 'egm-option').props.onClick()
+  const optionButtons = collectByClass(tree, 'egm-option')
+  assert.ok(optionButtons[0], '选择卡里有选项')
+  optionButtons[0].props.onClick() // 对话框方式；0.10 选择即自动记住，没有「不再提示」勾选框
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(store.getDraft(), '/egm 甲', '选对话框方式进模式')
-  assert.equal(memory.get('egm.launchMode'), 'composer', '选择被记住')
+  assert.equal(memory.get('egm.launchMode'), 'composer', '选择被自动记住')
 
-  findByClass(tree, 'egm-chip').props.onClick() // 模式开着 → 关
+  // 模式开着时点入口只开合面板，关模式要走面板里的「取消本次启动」。
+  findByClass(tree, 'egm-chip').props.onClick()
+  tree = react.render(Dock, { sessionId: 's1' })
+  const exit = buttonByText(tree, '取消本次启动')
+  assert.ok(exit, '面板里有「取消本次启动」')
+  exit.props.onClick()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(findByClass(tree, 'egm-mode-mark'), null, '模式关了')
 
