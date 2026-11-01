@@ -1,6 +1,6 @@
 {
   "name": "dsh-egm",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Design-review gate for DSH: the Elephant drafts the design, zero-context Goldfish reviewers attack it, you approve before any implementation.",
   "license": "Apache-2.0",
   "author": "643048695",

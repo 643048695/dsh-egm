@@ -2577,12 +2577,17 @@ test('模式：证明不了会走 /egm 的一律拦下（别的命令、未 clai
   assert.equal(empty.store.calls.filter((call) => call[0] === 'submit').length, 1, '空草稿没有可发内容，不拦')
 })
 
-test('模式：标记挂上后 submit 照常放行，关掉模式立刻恢复原生 submit', async () => {
+test('模式：标记挂上后，新需求先选流程再发；关掉模式立刻恢复原生 submit', async () => {
   const { react, store, Dock } = await modeScene({ draft: '甲' })
   clickChip(react, Dock)
   assert.equal(store.getCommand(), '/egm ')
+  // 新需求第一次发送：先弹「选个流程」，这一刻不交给宿主。
   store.shell.submit('queue', 'enter')
-  assert.equal(store.calls.filter((call) => call[0] === 'submit').length, 1, 'claimed 状态下交给宿主走 /egm')
+  assert.equal(store.calls.filter((call) => call[0] === 'submit').length, 0, '新需求先问流程，别直接发')
+  const picker = findByClass(react.render(Dock, { sessionId: 's1' }), 'egm-workflow-card')
+  assert.ok(picker, '发送时必须弹出流程选择')
+  await picker.props.onClick()
+  assert.equal(store.calls.filter((call) => call[0] === 'submit').length, 1, '选完流程才交给宿主走 /egm')
   assert.equal(store.getCommand(), '/egm ', '发完之后模式还开着，chip 重新挂上等下一条')
 
   const again = await modeScene({ draft: '乙' })
