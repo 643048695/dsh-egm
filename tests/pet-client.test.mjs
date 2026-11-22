@@ -728,10 +728,9 @@ test('状态：只读 RPC egm-pet/state，参数带当前 sessionId，并沿用�
   assert.equal(rpc.calls.length, 1)
   assert.equal(
     JSON.stringify(rpc.calls[0]),
-    JSON.stringify(['/api', 'egm-pet/state', { sessionId: 's1', wantEvidence: true }]),
+    JSON.stringify(['/api', 'egm-pet/state', { sessionId: 's1', wantEvidence: false }]),
   )
-  assert.equal(timers.length, 1)
-  assert.equal(timers[0].ms, 1200)
+  assert.equal(timers.length, 0, '空闲状态只读一次，不再常驻轮询')
 })
 
 test('状态：回包 sessionId 对不上就丢弃，不做“最近会话”回退', async () => {
@@ -743,7 +742,7 @@ test('状态：回包 sessionId 对不上就丢弃，不做“最近会话”回
   await settle()
   const tree = react.render(Dock, { sessionId: 's1' })
   const chip = findByClass(tree, 'egm-chip')
-  assert.match(chip.props.title, /不属于当前会话/)
+  assert.match(chip.props.title, /读取中/)
   assert.equal(chip.props['aria-label'], '选择 EGM 启动方式')
   assert.equal(findByClass(tree, 'egm-pet-chip'), null, '状态不可信时不出宠物')
   assert.equal(findByClass(tree, 'egm-chip-badge'), null)
@@ -767,13 +766,13 @@ test('状态：中断后保留最近一次成功数据并标明“已中断”',
       },
     }
   })
-  const { Dock } = asTree(mod, react, rpc)
+  const { Dock, ctx } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
   assert.match(findByClass(tree, 'egm-chip').props.title, /空闲/)
   fail = true
-  timers.shift().fn()
+  mod.__test.triggerImmediatePoll('s1', ctx)
   await settle()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.match(findByClass(tree, 'egm-chip').props.title, /后端断开|最近一次/)
@@ -898,7 +897,7 @@ test('工作动画：EGM 回合结束或断线时立刻停，场景不残留', a
     }
     return { ok: true, value: workingState({ state: 'prep' }) }
   })
-  const { Dock } = asTree(mod, react, rpc)
+  const { Dock, ctx } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
@@ -906,7 +905,7 @@ test('工作动画：EGM 回合结束或断线时立刻停，场景不残留', a
 
   // 回合结束：state 回 idle，工作场景立刻消失。
   mode = 'idle'
-  timers.shift().fn()
+  mod.__test.triggerImmediatePoll('s1', ctx)
   await settle()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(petChips(tree).length, 0)
@@ -914,13 +913,13 @@ test('工作动画：EGM 回合结束或断线时立刻停，场景不残留', a
 
   // 又跑起来，然后后端断线：同样立刻停。
   mode = 'busy'
-  timers.shift().fn()
+  mod.__test.triggerImmediatePoll('s1', ctx)
   await settle()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(petChips(tree)[0].props['data-work'], 'true')
 
   mode = 'down'
-  timers.shift().fn()
+  mod.__test.triggerImmediatePoll('s1', ctx)
   await settle()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(petChips(tree).length, 0, '断线后不放动画')
@@ -1026,7 +1025,7 @@ test('卡片：打开后任务结束，卡片留到用户自己收起', async ()
         }
       : { ok: true, value: workingState() },
   )
-  const { Dock } = asTree(mod, react, rpc)
+  const { Dock, ctx } = asTree(mod, react, rpc)
   react.render(Dock, { sessionId: 's1' })
   await settle()
   let tree = react.render(Dock, { sessionId: 's1' })
@@ -1035,7 +1034,7 @@ test('卡片：打开后任务结束，卡片留到用户自己收起', async ()
   assert.ok(findById(tree, 'egm-goldfish-panel'))
 
   done = true
-  timers.shift().fn()
+  mod.__test.triggerImmediatePoll('s1', ctx)
   await settle()
   tree = react.render(Dock, { sessionId: 's1' })
   assert.equal(findByClass(tree, 'egm-pet-chip'), null, '任务结束后不再常驻宠物')
@@ -2107,7 +2106,7 @@ test('挂载：没有轮询结果或观察器事件也会主动重测一次', as
   assert.equal(flushFrame(), 1)
   assert.equal(react.updates, before + 1, '挂载测量触发真实 state 更新')
   const ready = react.render(Dock, { sessionId: 's1' })
-  assert.equal(ready.props['data-egm-version'], '0.8.6')
+  assert.match(ready.props['data-egm-version'], /^\d+\.\d+\.\d+$/)
   assert.equal(ready.props['data-egm-anchor'], 'ready')
   assert.notEqual(ready.props['data-panel-mode'], 'hidden')
   assert.equal(frames.length, 0, '重渲染自身不得重复排队')
@@ -2171,7 +2170,7 @@ test('提示：定位失败与发送接口错误都不再误称放不下', async
   tree = react.render(Dock, { sessionId: 's1' })
   assert.match(textOf(findByClass(tree, 'egm-chip')), /定位失败/)
   assert.doesNotMatch(textOf(findByClass(tree, 'egm-chip')), /放不下/)
-  assert.match(findByClass(tree, 'egm-chip').props.title, /0\.8\.6.*量不到/)
+  assert.match(findByClass(tree, 'egm-chip').props.title, /量不到.*不猜位置/)
   assert.equal(mod.__test.entryNoticeLabel('宿主接口出现异常'), '查看提示')
 })
 
